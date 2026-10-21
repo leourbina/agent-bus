@@ -153,6 +153,39 @@ Behaviour of `setup(api)`: resolve bus home (`process.env.AGENT_BUS_HOME` or `~/
 
 ---
 
+### Task 6: Per-session listener so OpenCode sessions can talk to Claude sessions
+
+Added after live testing: an OpenCode session's `send_message` to a Claude peer fails with "claude peer ... refused the message", because `uds.send_peer_message` needs the sender's own return socket (`uds._our_socket()`), and a session registration starts no listener. Spec section 5.
+
+**Files:**
+- Modify: `src/agent_bus/listener.py` (new `start_session_listen`)
+- Modify: `src/agent_bus/cli.py` (`listen --session <sessionID>`)
+- Modify: `src/agent_bus/uds.py` (session-mode inbound delivery; `_our_socket` accepts the sender)
+- Modify: `src/agent_bus/adapters/transport/claude.py` (pass the sender through)
+- Modify: `src/agent_bus/commands/agents.py` (`register_session` and `touch_session` ensure the listener)
+- Test: `tests/agent_bus/transport/test_opencode_session_listener.py` (new)
+
+**Interfaces:**
+- Consumes: Task 2 `store.register_session`; Task 3 `agents.register_session`, `agents.touch_session`, `opencode.session_address`; Task 1 `addressing.is_live`.
+- Produces:
+  - `listener.start_session_listen(name: str, session_id: str, home: str | None = None) -> int | None` — idempotent: a live listener recorded in `<listener dir>/opencode-<sessionID>.pid` is reused; otherwise spawns `python -m agent_bus listen --session <sessionID> --name <name>` detached (same spawn style, env and log handling as `start_uds_listen`). Returns the listener pid.
+  - `agent-bus listen --session <sessionID>`: binds and publishes exactly like a normal listener (its own pid, its own socket, its Claude-compatible session file), records its socket path into the session's roster entry as `native.listenSock`, delivers each inbound user frame with `commands.messages.send(to=<session address>, text=<extracted text>, from_name=<extracted from-name>)` instead of filing it into a file inbox, and exits (cleaning up socket, session file, pid file, and `native.listenSock`) once `addressing.is_live(<session entry>)` is False, checked at least every 5 s, or on SIGTERM.
+  - `uds._our_socket(sender: str | None = None) -> str | None`: when `sender` resolves to a roster entry in the `tui` space whose `native.listenSock` exists, return that socket first; otherwise unchanged behaviour. `send_peer_message(target_sock, text, from_name)` passes `from_name` as the sender.
+  - Renaming a registered session restarts its listener under the new name (stop the recorded listener pid only, never a pattern kill).
+
+- [ ] **Step 1: Write failing tests:**
+  - `test_our_socket_prefers_the_sending_sessions_listener` — tui entry with `native.listenSock` = an existing temp file; `_our_socket("LiveA")` returns it; `_our_socket(None)` unchanged.
+  - `test_register_session_starts_one_listener` — monkeypatch the spawn; `agents.register_session` twice for the same session spawns once.
+  - `test_touch_restarts_a_missing_listener_for_a_live_session` and `test_touch_does_not_start_a_listener_for_a_closed_session`.
+  - `test_session_listener_delivers_inbound_frames_into_the_session` — drive the session-mode frame handler with an authenticated user frame carrying `from-name="Claude A"`; assert `messages.send` (or the opencode transport's `_api`, faked) received the text addressed to `opencode:tui:<id>` with sender `Claude A`.
+  - `test_session_listener_exits_when_the_session_closes` — real `agent-bus listen --session` subprocess against a tmp `AGENT_BUS_HOME` with presence toggled off; it exits within 10 s and removes its socket and pid file.
+- [ ] **Step 2: Run** them — Expected: FAIL.
+- [ ] **Step 3: Implement** per Interfaces.
+- [ ] **Step 4: Run** the new file plus `tests/agent_bus/transport tests/agent_bus/mcp -q` — Expected: PASS. Then the full gate.
+- [ ] **Step 5: Commit** `feat(opencode): per-session listener so sessions can message Claude peers`.
+
+---
+
 ### Task 5: Full gate and live verification
 
 **Files:** none new (fixes only, if verification finds bugs; each fix gets its own failing test first).

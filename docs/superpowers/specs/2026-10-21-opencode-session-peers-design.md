@@ -175,6 +175,24 @@ Live verification needs the service to run the fork: `uv tool install` the
 branch, then `opencode service restart`. Existing `other-*` / `pending-*`
 entries are left to the bus's normal pruning; no migration.
 
+### 5. Talking to Claude sessions: a per-session return socket
+
+Found in live testing. Sending to a Claude session goes over Claude's own UDS
+socket, and Claude requires the sender to name a return socket of its own
+(`uds._our_socket()`): it dials that socket back to acknowledge, and a Claude
+agent replies natively to that `from` address. A registered OpenCode session
+has no socket, so Claude refuses its messages.
+
+So a registered OpenCode session gets its own listener: a detached
+`agent-bus listen` process bound to its own socket, like the listeners the
+bus already runs for other non-Claude peers, but tied to the session instead
+of a host pid. Its socket is the session's return address when the session
+sends to a Claude peer. Inbound user frames on it are delivered into the
+session through the normal send path (the opencode transport), so Claude's
+native replies land in the right session's context. It exits once the
+session is no longer live (no TUI has it open), and is started again
+on the session's next tool call if the session is live and registered.
+
 ## Left to the builder
 
 - Presence file location, shape, and write mechanics.
