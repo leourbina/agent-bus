@@ -68,6 +68,43 @@ def _available() -> bool:
     return shutil.which(COMMAND) is not None
 
 
+# Session id -> its root session id. A parent never changes once a session
+# exists, so this never goes stale; it saves a server round trip per tool call.
+_ROOTS: dict[str, str] = {}
+
+
+def session_address(session_id: str) -> str:
+    """The bus address of an opencode session: `opencode:tui:<id>`."""
+    return str(_address.mint(KIND, SPACE, session_id))
+
+
+def root_session(session_id: str) -> str:
+    """The top-level session a (sub)session belongs to, following `parentID`.
+
+    A subagent's task runs in a child session, and its tool calls carry the
+    child's id; the agent on the bus is the conversation it serves. If the
+    server cannot answer, the id is returned unchanged (and not cached).
+    """
+    cached = _ROOTS.get(session_id)
+    if cached is not None:
+        return cached
+    current = session_id
+    seen = {current}
+    try:
+        while True:
+            session = _api("session.get", sessionID=current) or {}
+            parent = session.get("parentID")
+            if not parent or parent in seen:
+                break
+            current = str(parent)
+            seen.add(current)
+    except OpenCodeError:
+        return session_id
+    for visited in seen:
+        _ROOTS[visited] = current
+    return current
+
+
 def _as_session_id(target: str) -> str | None:
     """The bare session id inside an address we minted, or a bare `ses_` id."""
     addr = _address.parse(target)

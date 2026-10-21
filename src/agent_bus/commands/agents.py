@@ -10,6 +10,7 @@ from typing import Any
 from .. import command_events as ev
 from .. import log, store
 from ..adapters import addressing
+from ..adapters.transport.opencode import session_address
 from ..listener import (
     host_pid_for_listener,
     publish_status,
@@ -21,7 +22,9 @@ from ..log import logged
 from ..protocol import (
     AgentTarget,
     BridgeAddress,
+    RosterEntry,
     normalize_kind,
+    now_iso,
     roster_to_public,
 )
 
@@ -352,3 +355,63 @@ def set_status(
     recorded = store.set_status(status, home=home)
     published = publish_status(me.pid, status, cwd, home=home) if me.pid else False
     return {"recorded": bool(recorded), "published": bool(published), "status": status}
+
+
+# --- OpenCode sessions -------------------------------------------------------
+#
+# One MCP server serves every session the OpenCode service hosts, so "this
+# process" is nobody. These take the calling session's id (from the tool
+# call's _meta, see mcp_server) and act on that session's own entry,
+# `opencode:tui:<sessionID>`, which has no pid and no file inbox.
+
+
+def _session_entry(session_id: str, home: str | None) -> RosterEntry | None:
+    address = session_address(session_id)
+    return next((e for e in store.load_roster(home) if e.id == address), None)
+
+
+def session_name(session_id: str, home: str | None = None) -> str | None:
+    """The name a session registered under, or None if it has no entry."""
+    entry = _session_entry(session_id, home)
+    return entry.name if entry is not None else None
+
+
+@logged
+def register_session(name: str, session_id: str, home: str | None = None) -> dict[str, Any]:
+    """Claim a name on the bus for one OpenCode session."""
+    entry = store.register_session(
+        name, "opencode", session_address(session_id), {"sessionID": session_id}, home=home)
+    return {**roster_to_public(entry), "registered": True}
+
+
+@logged
+def session_self(session_id: str, home: str | None = None) -> dict[str, Any]:
+    """The session's own entry, or its address if it has not registered."""
+    entry = _session_entry(session_id, home)
+    if entry is None:
+        return {"registered": False, "address": session_address(session_id)}
+    return {**roster_to_public(entry), "registered": True}
+
+
+@logged
+def set_session_status(status: str, session_id: str, home: str | None = None) -> dict[str, Any]:
+    """Report what one OpenCode session is doing. Roster only: it has no listener."""
+    entry = _session_entry(session_id, home)
+    if entry is None:
+        return {"recorded": False, "published": False, "status": status,
+                "reason": "not registered"}
+    entry.status = status  # type: ignore[assignment]
+    entry.updatedAt = now_iso()
+    store.save_roster_entry(entry, home)
+    return {"recorded": True, "published": False, "status": status}
+
+
+def touch_session(session_id: str, home: str | None = None) -> bool:
+    """Move a registered session's updatedAt to now: it just made a tool call,
+    so its retention counts from here. False when it has no entry."""
+    entry = _session_entry(session_id, home)
+    if entry is None:
+        return False
+    entry.updatedAt = now_iso()
+    store.save_roster_entry(entry, home)
+    return True
