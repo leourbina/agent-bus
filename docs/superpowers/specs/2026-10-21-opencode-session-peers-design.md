@@ -39,8 +39,12 @@ service, so a follow-up cannot find its way back to the session that sent it.
    absent agent, so nothing wakes a closed session and spends tokens.
    **Closing frees the name.** While no live TUI has the session, its entry
    is not live, may be pruned like any dead entry, and its name is free for
-   another agent to register. A reopened session registers again, like a
-   fresh start; the bus does not reclaim the old name for it (my call).
+   another agent to register. When a TUI reopens the session, it gets its
+   last name back automatically if that name is still free, with no
+   re-registering. If another agent took it meanwhile, the session comes back
+   unregistered and registers again under a different name. So the bus must
+   remember a closed session's last name even after its entry stops being
+   live or is pruned.
 6. **`self` answers the session.** A registered session's `self` returns its
    own registered entry.
 
@@ -190,8 +194,9 @@ entries are left to the bus's normal pruning; no migration.
 3. Close A's TUI: "A" disappears from `list`; sending to "A" is refused, and
    nothing is injected into A's session (checked with
    `opencode api session.message.list`).
-4. While A is closed, another agent can register the name "A". Reopen A's
-   session in a TUI and register it again: it becomes reachable under the
-   name it registered.
+4. Close A, then reopen its session in a TUI: "A" is reachable again with no
+   re-registering. Close A again, let another agent register "A", then reopen
+   A's session: it comes back unregistered (`self` says so) and must register
+   under a new name.
 5. Switch B's TUI to a different session: "B" stays reachable.
 6. The full gate passes.
