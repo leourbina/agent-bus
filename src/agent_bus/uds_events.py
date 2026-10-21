@@ -27,6 +27,17 @@ class ListenerSignalled(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SessionListenerEnded(Event):
+    """A session listener stopped serving its session. `why` is `not_live`
+    (no TUI has it open) or `unregistered` (its roster entry is gone)."""
+
+    level: ClassVar[Level] = "info"
+    message: ClassVar[str] = "session_listener_ended"
+    session_id: str
+    why: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ListenerAdoptedHost(Event):
     level: ClassVar[Level] = "info"
     message: ClassVar[str] = "listener_adopted_host"
@@ -269,7 +280,7 @@ class OwnSocketResolved(Event):
     level: ClassVar[Level] = "trace"
     message: ClassVar[str] = "own_socket_resolved"
     socket: str
-    #: `env`, `own_pid`, `listener_pid_file` or `ancestor`.
+    #: `session_listener`, `env`, `own_pid`, `listener_pid_file` or `ancestor`.
     via: str
 
 

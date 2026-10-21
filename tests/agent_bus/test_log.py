@@ -168,6 +168,30 @@ def test_emitting_a_record_does_not_prune_the_roster(logging_at, capsys):
     )
 
 
+def test_an_unreadable_roster_file_is_logged_once_not_recursively(logging_at, monkeypatch):
+    """Labelling a record reads the roster, and reading an unreadable roster
+    file writes a record. Unguarded, that recursed to the interpreter's limit
+    per bad file, and two bad files on a live bus hung the process at exit."""
+    from agent_bus import store
+
+    rdir = store._roster_dir(None)
+    os.makedirs(rdir, exist_ok=True)
+    with open(os.path.join(rdir, "corrupt.json"), "w", encoding="utf-8") as f:
+        f.write('{"name": "x"}dle"}')
+
+    calls = []
+    real = store.load_roster
+    monkeypatch.setattr(store, "load_roster", lambda home=None: calls.append(1) or real(home))
+
+    logging_at("trace")
+    real(None)
+
+    assert len(calls) == 1, f"labelling the record re-read the roster {len(calls)} times"
+    unreadable = [r for r in _read(logging_at.dest) if r.get("message") == "roster_file_unreadable"]
+    # One from the read itself, one from the identity lookup it triggered.
+    assert len(unreadable) == 2
+
+
 def test_unset_is_not_silent(logging_at, capsys):
     """Unset means INFO: routine traffic and failures both reach someone."""
     logging_at(None)

@@ -34,7 +34,7 @@ Requires `agent-bus` on `PATH` (`which agent-bus`).
 
 | Task                      | Command                                               |
 | ------------------------- | ----------------------------------------------------- |
-| See who is online         | `agent-bus list` (add `--kind all` for every harness) |
+| See who is online         | `agent-bus list`                                      |
 | See your own address      | `agent-bus self`                                      |
 | Send a message            | `agent-bus send <name> -m "text" --summary "short"`   |
 | Read your inbox           | `agent-bus inbox` (add `--unread`)                    |

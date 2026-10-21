@@ -160,3 +160,15 @@ def test_the_store_stays_permissive(bus, holder):
         to=AgentTarget(entry.name), text="written directly",
         from_name=AgentTarget("s"), home=bus,
     )
+
+
+def test_closed_opencode_session_refusal_names_the_tui(tmp_path, monkeypatch):
+    """A `tui` session has no process of its own; what is missing is a TUI."""
+    bus = str(tmp_path / "bus")
+    monkeypatch.setenv("AGENT_BUS_HOME", bus)
+    store.register_session(
+        "closed", "opencode", "opencode:tui:ses_gone", {"sessionID": "ses_gone"}, home=bus)
+    with pytest.raises(ValueError, match="receiver unavailable") as got:
+        messages.send(AgentTarget("closed"), "hi", from_name=AgentTarget("s"), home=bus)
+    assert "no OpenCode TUI has the session open" in str(got.value)
+    assert "process is not running" not in str(got.value)

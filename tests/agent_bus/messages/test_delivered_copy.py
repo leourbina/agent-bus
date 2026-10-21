@@ -59,7 +59,7 @@ def _claude_peer(bus, holder, name="a-claude"):
 
 
 def test_a_delivered_message_is_filed_already_read(bus, holder, monkeypatch):
-    monkeypatch.setattr("agent_bus.adapters.transport.for_kind", lambda k: _Delivered)
+    monkeypatch.setattr("agent_bus.adapters.transport.for_kind", lambda k, space=None: _Delivered)
     entry = _claude_peer(bus, holder)
 
     messages.send(to=entry.name, text="hello", from_name="s", home=bus)
@@ -75,7 +75,7 @@ def test_a_delivered_message_is_filed_already_read(bus, holder, monkeypatch):
 def test_a_refused_message_leaves_no_copy(bus, holder, monkeypatch):
     """No phantom mail. If the transport raised, nothing was delivered, and a
     record would claim otherwise."""
-    monkeypatch.setattr("agent_bus.adapters.transport.for_kind", lambda k: _Refused)
+    monkeypatch.setattr("agent_bus.adapters.transport.for_kind", lambda k, space=None: _Refused)
     entry = _claude_peer(bus, holder)
 
     with pytest.raises(ValueError):
@@ -88,7 +88,7 @@ def test_a_mailbox_failure_never_fails_a_delivered_send(bus, holder, monkeypatch
     """The swallow is deliberate. The message HAS been delivered; raising here
     would report a failure that did not happen, which is the expensive direction
     to be wrong in."""
-    monkeypatch.setattr("agent_bus.adapters.transport.for_kind", lambda k: _Delivered)
+    monkeypatch.setattr("agent_bus.adapters.transport.for_kind", lambda k, space=None: _Delivered)
     entry = _claude_peer(bus, holder)
 
     def _boom(*a, **kw):

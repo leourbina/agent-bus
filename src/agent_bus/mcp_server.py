@@ -13,6 +13,7 @@ from typing import Any, BinaryIO, TypedDict
 from . import __version__, fswatch, log
 from . import mcp_events as ev
 from .adapters.lifecycle import identify_mcp_client
+from .adapters.transport import opencode
 from .commands import agents, messages
 from .lifecycle import (
     SessionDescriptor,
@@ -219,16 +220,30 @@ def _error_fields(exc: BaseException) -> _ErrorFields:
 # drifted apart the first time.
 
 
-def _call_list_agents(args: dict[str, Any]) -> Any:
+# `session` is the calling OpenCode session's root id (see _caller_session), or
+# None for every other client and for an opencode call that names none. With
+# None each tool is exactly what it always was.
+
+
+def _call_list_agents(args: dict[str, Any], session: str | None) -> Any:
     return agents.list_agents()
 
 
-def _call_send(args: dict[str, Any]) -> Any:
+def _call_send(args: dict[str, Any], session: str | None) -> Any:
     # from_name is deliberately not read from args: the schema never
     # advertised it, but _call_send used to read it anyway, so any MCP
     # client could claim to be any name at all (#156). Leaving it out here
     # is the whole fix -- messages.send()'s own from_name parameter still
     # exists, for a caller (the CLI) that is entitled to assert an identity.
+    # An OpenCode session is one such caller: the harness, not the agent,
+    # names the session in _meta, and the label is that session's own name.
+    if session is not None:
+        return messages.send(
+            to=args["to"],
+            text=args["text"],
+            summary=args.get("summary") or "",
+            from_name=agents.session_name(session) or opencode.session_address(session),
+        )
     return messages.send(
         to=args["to"],
         text=args["text"],
@@ -236,21 +251,36 @@ def _call_send(args: dict[str, Any]) -> Any:
     )
 
 
-def _call_inbox(args: dict[str, Any]) -> Any:
+# An OpenCode session has no file inbox: a message to it is queued as a turn
+# in its own conversation, which is where the agent reads it.
+_NO_SESSION_INBOX = "messages reach this session in its conversation; there is no inbox to read"
+
+
+def _call_inbox(args: dict[str, Any], session: str | None) -> Any:
+    if session is not None:
+        return []
     return messages.inbox(
         unread_only=bool(args.get("unread_only")),
     )
 
 
-def _call_read(args: dict[str, Any]) -> Any:
+def _call_read(args: dict[str, Any], session: str | None) -> Any:
+    if session is not None:
+        raise ValueError(_NO_SESSION_INBOX)
     return messages.read_one(args["message_id"])
 
 
-def _call_ack(args: dict[str, Any]) -> Any:
+def _call_ack(args: dict[str, Any], session: str | None) -> Any:
+    if session is not None:
+        return {"acked": False, "reason": "no inbox: messages arrive in the conversation"}
     return messages.ack(args["message_id"])
 
 
-def _call_register(args: dict[str, Any]) -> Any:
+def _call_register(args: dict[str, Any], session: str | None) -> Any:
+    if session is not None:
+        # The session is the agent, not this process: no pid. Its listener is
+        # keyed by the session id instead (agents.register_session starts it).
+        return agents.register_session(args["name"], session)
     # Once the handshake has identified this connection's kind, that answer
     # is authoritative -- _register_tool() already omits `kind` from the
     # schema in that case, so a value in args here is either absent or a
@@ -318,15 +348,19 @@ def _call_register(args: dict[str, Any]) -> Any:
     return result
 
 
-def _call_set_status(args: dict[str, Any]) -> Any:
+def _call_set_status(args: dict[str, Any], session: str | None) -> Any:
+    if session is not None:
+        return agents.set_session_status(args["status"], session)
     return agents.set_status(args["status"], cwd=args.get("cwd"))
 
 
-def _call_self(_args: dict[str, Any]) -> Any:
+def _call_self(_args: dict[str, Any], session: str | None) -> Any:
+    if session is not None:
+        return agents.session_self(session)
     return agents.self_info()
 
 
-_CALLS: dict[str, Callable[[dict[str, Any]], Any]] = {
+_CALLS: dict[str, Callable[[dict[str, Any], str | None], Any]] = {
     "register": _call_register,
     "set_status": _call_set_status,
     "list_agents": _call_list_agents,
@@ -356,6 +390,29 @@ def _missing_required_field(tool: str, args: dict[str, Any]) -> str | None:
         if not args.get(field):
             return field
     return None
+
+
+# Set by OpenCode's harness on every tools/call it sends (probed on 2.0.32).
+OPENCODE_SESSION_META = "ai.opencode/sessionID"
+
+
+def _caller_session(params: dict[str, Any]) -> str | None:
+    """The root OpenCode session making this call, or None.
+
+    One OpenCode service runs this server for every session it hosts, so who
+    is calling is decided per call and never stored. Only the harness-set
+    _meta counts, never tool arguments (#156), and only from a connection the
+    handshake placed as opencode.
+    """
+    if _CLIENT_KIND_HINT != opencode.KIND:
+        return None
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    session = meta.get(OPENCODE_SESSION_META)
+    if not isinstance(session, str) or not session:
+        return None
+    return opencode.root_session(session)
 
 
 def handle_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -613,20 +670,34 @@ def _dispatch(msg: dict[str, Any]) -> dict[str, Any] | None:
             log.emit(ev.McpToolFieldMissing(tool=name, missing_field=missing))
             return _err(mid, -32602, f"{name}: {missing!r} is required")
         log.emit(ev.McpToolAccepted(tool=name, args=log.describe(args)))
+        try:
+            session = _caller_session(params)
+        except Exception as e:  # noqa: BLE001  # never take the shared server down
+            # One OpenCode service hosts every session on this one server; an
+            # uncaught error here would end it for all of them.
+            log.emit(ev.McpToolRaised(tool=name, **_error_fields(e)))
+            return _err(mid, -32000, str(e))
         # A tool call is proof the agent is alive and working right now, which
         # is the one presence signal we can observe without being told. It says
-        # nothing about idle-vs-busy, so it only moves updatedAt.
+        # nothing about idle-vs-busy, so it only moves updatedAt. For an
+        # OpenCode session that is its own entry, so its retention counts from
+        # its last tool call rather than from registration.
         me_pid: int | None = None
         try:
-            me = get_self()
-            me_pid = me.pid if me is not None else None
-            if me_pid:
-                touch_published_session(me_pid)
-        except OSError as e:
-            # Presence is best-effort; a missing session file is not an error.
+            if session is not None:
+                agents.touch_session(session)
+            else:
+                me = get_self()
+                me_pid = me.pid if me is not None else None
+                if me_pid:
+                    touch_published_session(me_pid)
+        except Exception as e:  # noqa: BLE001  # presence is best-effort
+            # A missing session file is not an error, and nothing else that
+            # goes wrong refreshing presence may fail the call (or, for the
+            # shared OpenCode server, every hosted session with it).
             log.emit(ev.McpPresenceTouchSkipped(target_pid=me_pid, **_error_fields(e)))
         try:
-            return _ok(mid, fn(args))
+            return _ok(mid, fn(args, session))
         except Exception as e:  # noqa: BLE001  # any tool error becomes a JSON-RPC error
             # The only place a tool call's own failure reaches a log at all --
             # otherwise it is visible solely as a JSON-RPC error on the wire,
@@ -677,6 +748,28 @@ def _read_stdio_message(inp: BinaryIO) -> dict[str, Any] | None:
     parsed = json.loads(body)
     log.emit(ev.McpFrameRead(framing=_LAST_FRAMING, frame_bytes=len(body)))
     return parsed
+
+
+def _has_buffered_input(inp: BinaryIO) -> bool:
+    """True if `inp` already holds unread bytes, without ever blocking.
+
+    A client that writes several frames back to back (OpenCode sends
+    notifications/initialized and tools/list together) has them all pulled
+    into the reader's buffer by the first readline(); the fd then looks empty
+    to select()/the fs watcher, which would wait forever with those frames
+    unanswered. Peeking with the fd briefly non-blocking returns the buffer
+    as-is, or b"" when it is empty and nothing more has arrived.
+    """
+    peek = getattr(inp, "peek", None)  # not on BinaryIO itself, only some concrete streams
+    if peek is None:
+        return False
+    fd = inp.fileno()
+    blocking = os.get_blocking(fd)
+    os.set_blocking(fd, False)
+    try:
+        return bool(peek(1))
+    finally:
+        os.set_blocking(fd, blocking)
 
 
 def _write_stdio_message(out: BinaryIO, msg: dict[str, Any]) -> None:
@@ -880,7 +973,11 @@ def serve(stdin: BinaryIO | None = None, stdout: BinaryIO | None = None) -> None
                 else:
                     watched_dirs = []
 
-            if waiter is not None:
+            if _has_buffered_input(inp):
+                # Frames already read off the fd: answer them before waiting
+                # on it, or they sit unanswered until the client writes again.
+                input_ready = True
+            elif waiter is not None:
                 input_ready, _dir_changed = waiter.wait(NOTIFICATION_SAFETY_NET_SECONDS)
                 # Recheck regardless of whether the wake was a real
                 # directory event or the safety net's timeout elapsing --

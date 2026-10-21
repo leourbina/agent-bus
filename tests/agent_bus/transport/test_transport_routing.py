@@ -135,7 +135,7 @@ def test_the_capability_matrix_is_sparse():
     # per-session summary, and cannot answer "which pid is it".
     assert disc == {"claude", "omp"}
     assert life == {"claude", "grok"}
-    assert tran == {"claude", "codex"}
+    assert tran == {"claude", "codex", "opencode"}
     assert "grok" in life and "grok" not in disc
     assert disc not in (life, tran)
     assert "codex" in tran and "codex" not in disc
@@ -146,6 +146,7 @@ def test_the_capability_matrix_is_sparse():
 @pytest.mark.parametrize("kind,expected", [
     ("claude", "claude"),
     ("codex", "codex"),
+    ("opencode", "opencode"),
     ("grok", None),
     ("omp", None),
     ("never-heard-of-it", None),

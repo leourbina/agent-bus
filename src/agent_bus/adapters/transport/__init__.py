@@ -21,17 +21,23 @@ from __future__ import annotations
 from typing import Any
 
 from ...protocol import AgentTarget
-from . import claude, codex, filebus
+from . import claude, codex, filebus, opencode
 
 # Kinds with a native channel. Everything else -- grok, omp, and any harness we
 # have not heard of -- reads the file bus.
-ADAPTERS: tuple[Any, ...] = (claude, codex)
+ADAPTERS: tuple[Any, ...] = (claude, codex, opencode)
 
 
-def for_kind(kind: str) -> Any | None:
-    """The native transport for this kind, or None to mean the file bus."""
+def for_kind(kind: str, space: str | None = None) -> Any | None:
+    """The native transport for this kind, or None to mean the file bus.
+
+    An adapter that declares a SPACE owns only addresses in it: an opencode
+    session is reached through OpenCode, while an opencode process that
+    registered through the MCP server reads its file inbox like anyone else.
+    """
     for adapter in ADAPTERS:
-        if kind == adapter.KIND:
+        owned = getattr(adapter, "SPACE", None)
+        if kind == adapter.KIND and (owned is None or space is None or space == owned):
             return adapter
     return None
 
@@ -64,4 +70,4 @@ def resolve_unknown(target: AgentTarget) -> tuple[Any, dict[str, Any]] | None:
     return None
 
 
-__all__ = ["ADAPTERS", "claude", "codex", "filebus", "for_kind", "resolve_unknown"]
+__all__ = ["ADAPTERS", "claude", "codex", "filebus", "for_kind", "opencode", "resolve_unknown"]

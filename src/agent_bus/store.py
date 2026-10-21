@@ -18,6 +18,7 @@ from typing import Any
 from . import log as bus_log
 from . import registry_events as ev
 from .adapters import addressing
+from .address import BUS, SESSION, THREAD, TUI
 from .address import parse as parse_address
 from .logevents import describe_error
 
@@ -83,6 +84,13 @@ REAP_AFTER_SECONDS = MESSAGE_TTL_SECONDS * 2
 # already in flight gets before it expires. Aligns with Claude Code's own
 # `formerNames` field, docs/harnesses/claude-code-presence.md#2.
 FORMER_NAME_GRACE_SECONDS = MESSAGE_TTL_SECONDS
+
+# A closed OpenCode session is not gone: it reopens, and should come back under
+# the name it had. So a not-live `tui` entry survives pruning this long after
+# its last `updatedAt`. Sticky, not reserved: the name stays free for anyone
+# else meanwhile, and taking it drops the closed session's entry
+# (`_release_closed_session_names`).
+TUI_RETENTION_SECONDS = 7 * 24 * 3600
 
 
 def _roster_dir(home: str | None = None) -> str:
@@ -327,6 +335,96 @@ def has_mail(entry_id: str, home: str | None = None) -> bool:
     return _count_unread_lines(_inbox_path_for(entry_id, home)) > 0
 
 
+def _is_tui(entry: RosterEntry) -> bool:
+    return parse_address(str(entry.id), kind_hint=entry.kind).space == TUI
+
+
+def _within_tui_retention(entry: RosterEntry) -> bool:
+    """Best-effort: an `updatedAt` this cannot read counts as expired."""
+    try:
+        updated = datetime.datetime.fromisoformat(str(entry.updatedAt))
+        age = (datetime.datetime.now(datetime.UTC) - updated).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return age <= TUI_RETENTION_SECONDS
+
+
+def _used_names(entries: Sequence[RosterEntry]) -> set[str]:
+    """Every name `entries` answer to, including former names still inside
+    their grace window -- a name in either is not free to hand out, since it
+    already resolves to someone and `find_entry` would have to pick."""
+    return {e.name for e in entries} | {n for e in entries for n in _live_former_names(e)}
+
+
+def _first_free_name(name: str, used: set[str]) -> str:
+    """`name` itself if free, else the first free `name-2`, `name-3`, ..."""
+    if name not in used:
+        return name
+    i = 2
+    while f"{name}-{i}" in used:
+        i += 1
+    return f"{name}-{i}"
+
+
+def _rename(existing: RosterEntry, final_name: str) -> str | None:
+    """Rename `existing` to `final_name` in memory; return the outgoing name,
+    or None when it is unchanged."""
+    if existing.name == final_name:
+        return None
+    previous_name = existing.name
+    # #148: the outgoing name keeps resolving for
+    # FORMER_NAME_GRACE_SECONDS rather than going dead the instant
+    # this rename lands. Already-expired entries are dropped here
+    # rather than left to accumulate forever.
+    still_live = [f for f in existing.formerNames
+                  if f.get("name") in _live_former_names(existing)]
+    candidates = [
+        {"name": existing.name, "until": now_iso()}, *still_live,
+    ]
+    # A -> B -> A -> C revisits "A". Newest first, so the first
+    # occurrence of a name is always its most recent `until` --
+    # keep that one and drop the rest rather than resolving the
+    # same name from two records in the list.
+    seen: set[str] = set()
+    deduped = []
+    for f in candidates:
+        if f["name"] in seen:
+            continue
+        seen.add(f["name"])
+        deduped.append(f)
+    existing.formerNames = deduped
+    existing.name = final_name
+    return previous_name
+
+
+def _release_closed_session_names(
+    final_name: str, entries: Sequence[RosterEntry], home: str | None,
+    keep_id: str | None = None,
+) -> None:
+    """Delete every closed (not-live) `tui` entry named `final_name`.
+
+    A closed session's name is sticky, not reserved: once someone else is
+    registered under it, the closed session loses its entry, so on reopen it
+    is unregistered rather than a second holder of the same name. `keep_id`
+    is the registrant itself, never released by its own registration.
+    """
+    for e in entries:
+        if e.id == keep_id or e.name != final_name or not _is_tui(e):
+            continue
+        if addressing.is_live(e):
+            continue
+        path = _roster_path(e.id, home)
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+                bus_log.emit(ev.RosterEntryRemoved(
+                    decision="closed_session_name_released", entry_id=e.id,
+                    name=e.name, entry_kind=e.kind, holder_pid=e.pid, path=path))
+        except OSError as err:
+            bus_log.emit(ev.RosterEntryRemoveFailed(
+                entry_id=e.id, path=path, **describe_error(err)))
+
+
 def _prune(entries: list[RosterEntry], home: str | None) -> tuple[list[RosterEntry], int]:
     """Delete dead-without-mail entries from `entries`; return the survivors
     alongside the count removed.
@@ -348,6 +446,12 @@ def _prune(entries: list[RosterEntry], home: str | None) -> tuple[list[RosterEnt
         if addressing.is_live(entry):
             kept.append(entry)
             continue
+        if _is_tui(entry) and _within_tui_retention(entry):
+            kept.append(entry)
+            bus_log.emit(ev.RosterEntryRetained(
+                why="closed_session_within_retention", entry_id=entry.id,
+                name=entry.name, holder_pid=entry.pid, unread=0))
+            continue  # closed, not gone -- it keeps its name if it reopens
         unread = _count_unread_lines(_inbox_path_for(entry.id, home))
         if unread > 0:
             kept.append(entry)
@@ -390,6 +494,26 @@ def _make_inbox_ref(entry_id: str, home: str | None = None) -> str:
     return f"file:{_inbox_path_for(entry_id, home)}"
 
 
+_ADDRESS_SPACES = frozenset({BUS, SESSION, THREAD, TUI})
+
+
+def _check_name(name: str) -> None:
+    """Refuse a name that reads as an address.
+
+    A name is matched before ids, so a session registered as
+    `opencode:tui:ses_b` would receive replies meant for unregistered session
+    B (which sends labelled with its address) and could send under B's label.
+    """
+    if not name:
+        raise ValueError("name required")
+    if name.startswith("ses_") or (
+            ":" in name and parse_address(name).space in _ADDRESS_SPACES):
+        raise ValueError(
+            f"name {name!r} looks like an address, and names must not: pick a "
+            "plain name such as 'platform' (no 'kind:space:' prefix, no 'ses_' prefix)."
+        )
+
+
 def register(
     name: str,
     kind: Kind,
@@ -415,8 +539,7 @@ def register(
     # stored by any of the three paths that write it (same-pid rename,
     # takeover, fresh mint) routes nowhere.
     kind = normalize_kind(kind)
-    if not name:
-        raise ValueError("name required")
+    _check_name(name)
 
     all_entries = load_roster(home)
     # Every pid this call could end up asking `ps` about: existing entries
@@ -456,38 +579,8 @@ def register(
                 # A name still inside another entry's grace window is not free to
                 # take either -- it already resolves to someone, and handing it
                 # to a second entry would make `find_entry` pick between them.
-                used_names = ({e.name for e in other_live}
-                              | {n for e in other_live for n in _live_former_names(e)})
-                final_name = name
-                if name in used_names:
-                    i = 2
-                    while f"{name}-{i}" in used_names:
-                        i += 1
-                    final_name = f"{name}-{i}"
-                previous_name = existing.name if existing.name != final_name else None
-                if existing.name != final_name:
-                    # #148: the outgoing name keeps resolving for
-                    # FORMER_NAME_GRACE_SECONDS rather than going dead the instant
-                    # this rename lands. Already-expired entries are dropped here
-                    # rather than left to accumulate forever.
-                    still_live = [f for f in existing.formerNames
-                                  if f.get("name") in _live_former_names(existing)]
-                    candidates = [
-                        {"name": existing.name, "until": now_iso()}, *still_live,
-                    ]
-                    # A -> B -> A -> C revisits "A". Newest first, so the first
-                    # occurrence of a name is always its most recent `until` --
-                    # keep that one and drop the rest rather than resolving the
-                    # same name from two records in the list.
-                    seen: set[str] = set()
-                    deduped = []
-                    for f in candidates:
-                        if f["name"] in seen:
-                            continue
-                        seen.add(f["name"])
-                        deduped.append(f)
-                    existing.formerNames = deduped
-                existing.name = final_name
+                final_name = _first_free_name(name, _used_names(other_live))
+                previous_name = _rename(existing, final_name)
                 existing.kind = kind
                 existing.cwd = cwd
                 existing.updatedAt = now_iso()
@@ -502,6 +595,7 @@ def register(
                 if native:
                     existing.native = {**existing.native, **native}
                 save_roster_entry(existing, home)
+                _release_closed_session_names(final_name, all_entries, home)
                 bus_log.emit(ev.RegisterDecided(
                     decision="same_pid_update", why="pid_already_registered",
                     requested=name, final_name=final_name, entry_id=existing.id,
@@ -517,7 +611,7 @@ def register(
         # `other_live`, a few lines up) -- that one exists to exclude *self*
         # from the collision check on a rename, which is a different question
         # from "what may this new registration not collide with".
-        used_names = {e.name for e in live} | {n for e in live for n in _live_former_names(e)}
+        used_names = _used_names(live)
 
         # No live process holds this pid, so the loop above found nothing --
         # but a *dead* entry under this exact name and kind may still be on
@@ -543,11 +637,16 @@ def register(
         # (round-trip through a rename, both ends left with mail); picked by
         # `updatedAt`, not disk order (`load_roster` iterates `os.listdir`,
         # unsorted), so the choice is reproducible.
+        #
+        # Never a `tui` entry: that id names an OpenCode session, not a
+        # process, so a pid-backed registrant adopting it would make the
+        # session's own address answer to someone else. A closed session's
+        # name is released below instead (`_release_closed_session_names`).
         live_ids = {e.id for e in live}
         dead_candidates = sorted(
             (e for e in all_entries
              if e.id not in live_ids and e.name == name
-             and normalize_kind(e.kind) == kind),
+             and normalize_kind(e.kind) == kind and not _is_tui(e)),
             key=lambda e: e.updatedAt or "", reverse=True,
         )
         dead_same_name = dead_candidates[0] if dead_candidates else None
@@ -569,6 +668,7 @@ def register(
             dead_same_name.native = dict(native or {})
             dead_same_name.formerNames = []
             save_roster_entry(dead_same_name, home)
+            _release_closed_session_names(name, all_entries, home)
             bus_log.emit(ev.RegisterDecided(
                 decision="took_over_dead_entry", why="dead_entry_under_name_and_kind",
                 requested=name, final_name=name, entry_id=dead_same_name.id,
@@ -577,12 +677,7 @@ def register(
                 holder_pid=holder_pid, unread=unread))
             return dead_same_name
 
-        final_name = name
-        if name in used_names:
-            i = 2
-            while f"{name}-{i}" in used_names:
-                i += 1
-            final_name = f"{name}-{i}"
+        final_name = _first_free_name(name, used_names)
 
         rid = new_id()
         now = now_iso()
@@ -602,6 +697,7 @@ def register(
             aliases=sorted(set(aliases or [])),
         )
         save_roster_entry(entry, home)
+        _release_closed_session_names(final_name, all_entries, home)
         bus_log.emit(ev.RegisterDecided(
             decision="minted",
             why="name_held_by_live_entry" if dead_candidates
@@ -610,6 +706,65 @@ def register(
             entry_kind=kind, target_pid=pid, cwd=cwd, aliases=list(aliases or []),
             reused_id=False, candidates=len(dead_candidates), live_entries=len(live)))
         return entry
+
+def register_session(
+    name: str,
+    kind: Kind,
+    entry_id: str,
+    native: dict[str, Any],
+    cwd: str | None = None,
+    home: str | None = None,
+) -> RosterEntry:
+    """Upsert the entry for one harness session, keyed by `entry_id`.
+
+    For a session that is its own agent but not its own process (an OpenCode
+    TUI session, `opencode:tui:<sessionID>`): no pid, liveness is the address
+    space's rule. Names follow `register`'s collision rule against every
+    other live entry; re-registering the same `entry_id` renames it.
+    """
+    ensure_dirs(home)
+    kind = normalize_kind(kind)
+    _check_name(name)
+    all_entries, _ = _prune(load_roster(home), home)
+    other_live = [e for e in all_entries if e.id != entry_id and addressing.is_live(e)]
+    final_name = _first_free_name(name, _used_names(other_live))
+    existing = next((e for e in all_entries if e.id == entry_id), None)
+    now = now_iso()
+    if existing is not None:
+        previous_name = _rename(existing, final_name)
+        existing.kind = kind
+        existing.pid = None
+        existing.procStart = None
+        if cwd is not None:
+            existing.cwd = cwd
+        existing.native = {**existing.native, **native}
+        existing.updatedAt = now
+        entry = existing
+        decision, why, reused = "same_session_update", "session_already_registered", True
+    else:
+        previous_name = None
+        entry = RosterEntry(
+            id=MailboxRef(entry_id),
+            name=final_name,
+            kind=kind,
+            pid=None,
+            cwd=cwd,
+            status="idle",
+            inbox=_make_inbox_ref(entry_id, home),
+            native=dict(native),
+            registeredAt=now,
+            updatedAt=now,
+        )
+        decision, why, reused = "minted", "no_entry_for_session", False
+    save_roster_entry(entry, home)
+    _release_closed_session_names(final_name, all_entries, home, keep_id=entry_id)
+    bus_log.emit(ev.RegisterDecided(
+        decision=decision, why=why, requested=name, final_name=final_name,
+        entry_id=entry.id, entry_kind=kind, target_pid=None, cwd=cwd or "",
+        aliases=[], reused_id=reused, live_entries=len(other_live),
+        previous_name=previous_name))
+    return entry
+
 
 def unregister(name: str | None = None, home: str | None = None) -> bool:
     ensure_dirs(home)

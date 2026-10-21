@@ -580,3 +580,69 @@ def test_content_length_client_still_supported(tmp_path):
     assert b"Content-Length" in p.stdout, (
         f"LSP client must get an LSP-framed reply; got {p.stdout[:120]!r}"
     )
+
+
+def _frame_id(line: str) -> set[int]:
+    try:
+        return {json.loads(line).get("id")}
+    except json.JSONDecodeError:
+        return set()
+
+
+@pytest.mark.parametrize("framing", ["ndjson", "content-length"])
+def test_frames_written_back_to_back_are_all_answered(tmp_path, framing):
+    """OpenCode writes initialized + tools/list in one go right after
+    initialize. The first readline() pulls every frame into Python's buffer,
+    so the fd looks empty to select() -- the server must drain what it already
+    buffered instead of blocking with tools/list unanswered. stdin stays open:
+    EOF would make select() return and hide the hang.
+    """
+    import queue
+    import re
+    import threading
+
+    frames = [
+        {**INIT, "id": 0},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    ]
+    bodies = [json.dumps(f).encode() for f in frames]
+    if framing == "ndjson":
+        payload = b"".join(b + b"\n" for b in bodies)
+    else:
+        payload = b"".join(f"Content-Length: {len(b)}\r\n\r\n".encode() + b for b in bodies)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agent_bus", "mcp"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=_env(tmp_path), cwd=REPO,
+    )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    child_stdin, child_stdout = proc.stdin, proc.stdout
+    chunks: queue.Queue[bytes] = queue.Queue()
+    out_fd = child_stdout.fileno()
+    threading.Thread(
+        target=lambda: [chunks.put(c) for c in iter(lambda: os.read(out_fd, 65536), b"")],
+        daemon=True,
+    ).start()
+    try:
+        child_stdin.write(payload)
+        child_stdin.flush()
+        out = b""
+        ids: set[int] = set()
+        deadline = time.monotonic() + 10
+        while ids != {0, 1} and time.monotonic() < deadline:
+            try:
+                out += chunks.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            text = re.sub(r"Content-Length: \d+\r\n\r\n", "\n", out.decode())
+            # A frame still arriving fails to parse and is picked up next chunk.
+            ids = set().union(*(_frame_id(line) for line in text.splitlines()))
+        assert ids == {0, 1}, f"responses for ids {ids} only; raw={out[:300]!r}"
+        if framing == "content-length":
+            assert out.startswith(b"Content-Length"), out[:120]
+    finally:
+        child_stdin.close()
+        proc.wait(timeout=10)

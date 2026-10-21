@@ -20,9 +20,11 @@ from .logevents import Event, Level, MessageEvent
 class RegisterDecided(Event):
     """One `register()` call: what it was asked for and which rule answered.
 
-    `decision` is `same_pid_update`, `took_over_dead_entry` or `minted`.
+    `decision` is `same_pid_update`, `took_over_dead_entry` or `minted`, plus
+    `same_session_update` from `register_session()`.
     `why` is the rule: `pid_already_registered`, `dead_entry_under_name_and_kind`,
-    `no_dead_entry_under_name_and_kind` or `name_held_by_live_entry`.
+    `no_dead_entry_under_name_and_kind` or `name_held_by_live_entry`; from
+    `register_session()`, `session_already_registered` or `no_entry_for_session`.
     `candidates` counts the dead entries under the requested name and kind,
     and is absent for `same_pid_update`, which never looks for them;
     `holder_pid` is the pid the reused entry had before, and `unread` the mail
@@ -62,7 +64,8 @@ class RosterEntrySaved(Event):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RosterEntryRemoved(Event):
-    """`decision` is `pruned_dead`, `unregistered_by_name` or `unregistered_by_pid`."""
+    """`decision` is `pruned_dead`, `unregistered_by_name`, `unregistered_by_pid`
+    or `closed_session_name_released`."""
 
     level: ClassVar[Level] = "trace"
     message: ClassVar[str] = "roster_entry_removed"
@@ -78,7 +81,8 @@ class RosterEntryRemoved(Event):
 class RosterEntryRetained(Event):
     """A dead or departing entry kept because mail is still waiting in it.
 
-    `why` is `dead_entry_with_unread_mail` or `session_ended_with_unread_mail`.
+    `why` is `dead_entry_with_unread_mail`, `session_ended_with_unread_mail` or
+    `closed_session_within_retention`.
     """
 
     level: ClassVar[Level] = "trace"
@@ -386,6 +390,31 @@ class ListenerStopped(Event):
     message: ClassVar[str] = "listener_stopped"
     decision: str
     target_pid: int
+    path: str
+    listener_pid: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionListenerSpawnDecided(Event):
+    """`decision` is `spawned` or `already_running`."""
+
+    level: ClassVar[Level] = "trace"
+    message: ClassVar[str] = "session_listener_spawn_decided"
+    decision: str
+    name: str
+    session_id: str
+    path: str
+    listener_pid: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionListenerStopped(Event):
+    """`decision` is `signalled` or `not_running`."""
+
+    level: ClassVar[Level] = "trace"
+    message: ClassVar[str] = "session_listener_stopped"
+    decision: str
+    session_id: str
     path: str
     listener_pid: int | None = None
 

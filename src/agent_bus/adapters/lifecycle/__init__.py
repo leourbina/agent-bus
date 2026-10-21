@@ -59,6 +59,10 @@ def identify_mcp_client(
         omp-coding-agent     omp 1.0.0
         grok-shell-<server>  grok 1.0.5   -- embeds OUR server's name, so the
                                              match is a prefix, not equality
+        opencode             opencode 2.0.32 -- one server for every session
+                                             the service hosts; the caller's
+                                             session id arrives per tool call
+                                             in params._meta, never here
 
     No claude pattern on purpose: a Claude session running our MCP server is a
     misconfiguration, and `other` is the honest answer to it.
@@ -77,6 +81,8 @@ def identify_mcp_client(
         return "codex", None
     if name == "omp-coding-agent":
         return "omp", None
+    if name == "opencode":
+        return "opencode", None
     if name.startswith("grok-shell"):
         # GROK_SESSION_ID *is* present here, and reading it is safe precisely
         # because clientInfo already proved grok launched us as its MCP

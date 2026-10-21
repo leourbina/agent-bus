@@ -16,6 +16,7 @@ from typing import Any
 from .. import command_events as ev
 from .. import store
 from ..adapters import addressing, transport
+from ..address import TUI
 from ..log import emit, logged
 from ..protocol import (
     AgentTarget,
@@ -50,7 +51,7 @@ def send(
     entry = store.resolve_target(to, home)
     if entry is not None:
         _refuse_if_not_live(to, entry)
-        adapter = transport.for_kind(entry.kind)
+        adapter = transport.for_kind(entry.kind, addressing.for_entry(entry).SPACE)
         # roster_to_dict, not roster_to_public: an adapter is inside the bus and
         # needs the parts a caller must never see -- native, pid, inbox path.
         payload = roster_to_dict(entry)
@@ -135,6 +136,11 @@ def _refuse_if_not_live(to: str, entry: Any) -> None:
     """
     if addressing.is_live(entry):
         return
+    if addressing.for_entry(entry).SPACE == TUI:
+        raise ValueError(
+            f"receiver unavailable: {to} is an OpenCode session, but no OpenCode "
+            "TUI has the session open, so nothing would read this. Not sent."
+        )
     raise ValueError(
         f"receiver unavailable: {to} is registered as a {entry.kind} peer but "
         "its process is not running, so nothing would read this. Not sent. "

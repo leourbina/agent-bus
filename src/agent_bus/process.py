@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import time
 from collections.abc import Iterable, Iterator
 
 
@@ -119,6 +120,52 @@ def proc_start(pid: int | None) -> str | None:
         # No ps, or it would not run. "Cannot tell" is what None says.
         pass
     return None
+
+
+_MONTHS = {m: i for i, m in enumerate(
+    ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1)}
+
+
+def _boot_time() -> float | None:
+    """Wall-clock boot time from /proc/stat's `btime`, or None."""
+    try:
+        with open("/proc/stat", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return float(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def proc_start_epoch(pid: int | None) -> float | None:
+    """proc_start() as seconds since the epoch, or None if it cannot tell.
+
+    For ordering a process against a wall-clock time (a file's mtime), not for
+    identity: is_process_alive() still compares the raw strings. Second
+    granularity at best, so callers comparing against it need a tolerance.
+    """
+    started = proc_start(pid)
+    if started is None:
+        return None
+    if started.startswith(_BOOT_TICKS):
+        boot = _boot_time()
+        try:
+            ticks = int(started[len(_BOOT_TICKS):])
+            hz = os.sysconf("SC_CLK_TCK")
+        except (ValueError, OSError):
+            return None
+        return None if boot is None or hz <= 0 else boot + ticks / hz
+    # `ps -o lstart=` under the C locale: "Fri Aug 28 13:22:06 2026", local
+    # time. Parsed by hand: time.strptime's %b follows the process locale.
+    parts = started.split()
+    try:
+        _weekday, month, day, clock, year = parts
+        hour, minute, second = (int(x) for x in clock.split(":"))
+        fields = (int(year), _MONTHS[month], int(day), hour, minute, second, 0, 0, -1)
+        return time.mktime(fields)
+    except (ValueError, KeyError, OverflowError):
+        return None
 
 
 def _proc_starts_ps(pids: list[int]) -> dict[int, str | None] | None:
