@@ -25,14 +25,19 @@ function setup(api) {
       return undefined;
     };
 
-    const write = () => {
+    // True once the file lists `ids`; false on any fs error, so the caller
+    // records nothing and the next tick tries again.
+    const write = (ids) => {
       try {
         fs.mkdirSync(dir, { recursive: true });
         const tmp = `${file}.${process.pid}.tmp`;
-        const body = { pid: process.pid, sessionIDs: [...roots], updatedAt: new Date().toISOString() };
+        const body = { pid: process.pid, sessionIDs: ids, updatedAt: new Date().toISOString() };
         fs.writeFileSync(tmp, JSON.stringify(body));
         fs.renameSync(tmp, file);
-      } catch {}
+        return true;
+      } catch {
+        return false;
+      }
     };
 
     const tick = () => {
@@ -40,10 +45,7 @@ function setup(api) {
         const route = api.ui.router.current();
         if (route?.type !== "session") return;
         const id = root(route.sessionID);
-        if (id && !roots.has(id)) {
-          roots.add(id);
-          write();
-        }
+        if (id && !roots.has(id) && write([...roots, id])) roots.add(id);
       } catch {}
     };
 

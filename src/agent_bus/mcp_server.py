@@ -669,7 +669,13 @@ def _dispatch(msg: dict[str, Any]) -> dict[str, Any] | None:
             log.emit(ev.McpToolFieldMissing(tool=name, missing_field=missing))
             return _err(mid, -32602, f"{name}: {missing!r} is required")
         log.emit(ev.McpToolAccepted(tool=name, args=log.describe(args)))
-        session = _caller_session(params)
+        try:
+            session = _caller_session(params)
+        except Exception as e:  # noqa: BLE001  # never take the shared server down
+            # One OpenCode service hosts every session on this one server; an
+            # uncaught error here would end it for all of them.
+            log.emit(ev.McpToolRaised(tool=name, **_error_fields(e)))
+            return _err(mid, -32000, str(e))
         # A tool call is proof the agent is alive and working right now, which
         # is the one presence signal we can observe without being told. It says
         # nothing about idle-vs-busy, so it only moves updatedAt. For an
@@ -684,8 +690,10 @@ def _dispatch(msg: dict[str, Any]) -> dict[str, Any] | None:
                 me_pid = me.pid if me is not None else None
                 if me_pid:
                     touch_published_session(me_pid)
-        except OSError as e:
-            # Presence is best-effort; a missing session file is not an error.
+        except Exception as e:  # noqa: BLE001  # presence is best-effort
+            # A missing session file is not an error, and nothing else that
+            # goes wrong refreshing presence may fail the call (or, for the
+            # shared OpenCode server, every hosted session with it).
             log.emit(ev.McpPresenceTouchSkipped(target_pid=me_pid, **_error_fields(e)))
         try:
             return _ok(mid, fn(args, session))

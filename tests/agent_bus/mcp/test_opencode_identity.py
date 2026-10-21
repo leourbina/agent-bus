@@ -14,7 +14,7 @@ import pytest
 from agent_bus import mcp_server, opencode_presence, store
 from agent_bus.adapters.lifecycle import identify_mcp_client
 from agent_bus.adapters.transport import opencode
-from agent_bus.commands import agents
+from agent_bus.commands import agents, messages
 from agent_bus.mcp_server import handle_rpc
 from agent_bus.protocol import AgentTarget
 
@@ -199,3 +199,81 @@ def test_root_session_is_cached(bus, monkeypatch):
     assert opencode.root_session("ses_child") == "ses_a"
     assert opencode.root_session("ses_child") == "ses_a"
     assert calls == ["ses_child", "ses_a"]
+
+
+# --- one bad reply must not take down the server every session shares ------
+
+
+@pytest.mark.parametrize("reply", ["oops", ["ses_a"], 3])
+def test_root_session_falls_back_when_the_reply_is_not_a_dict(bus, monkeypatch, reply):
+    monkeypatch.setattr(opencode, "_api", lambda operation, **kw: reply)
+    assert opencode.root_session("ses_x") == "ses_x"
+    assert "ses_x" not in opencode._ROOTS
+
+
+def test_root_session_falls_back_on_any_error(bus, monkeypatch):
+    def boom(operation, **kw):
+        raise RuntimeError("surprise")
+
+    monkeypatch.setattr(opencode, "_api", boom)
+    assert opencode.root_session("ses_x") == "ses_x"
+
+
+def test_garbled_session_reply_still_serves_the_call(bus, monkeypatch):
+    monkeypatch.setattr(opencode, "_api", lambda operation, **kw: "garbage")
+    _result(_call("register", {"name": "Z"}, session="ses_z"))
+    assert "opencode:tui:ses_z" in {e.id for e in store.load_roster(bus)}
+
+
+def test_caller_session_failure_is_a_jsonrpc_error_not_a_crash(bus, monkeypatch):
+    def boom(session_id):
+        raise RuntimeError("surprise")
+
+    monkeypatch.setattr(opencode, "root_session", boom)
+    reply = _call("self", session="ses_a")
+    assert reply["error"]["code"] == -32000
+    assert "surprise" in reply["error"]["message"]
+
+
+def test_session_touch_failure_does_not_crash_the_call(bus, monkeypatch):
+    _result(_call("register", {"name": "A"}, session="ses_a"))
+
+    def boom(session_id, home=None):
+        raise RuntimeError("surprise")
+
+    monkeypatch.setattr(agents, "touch_session", boom)
+    assert _result(_call("self", session="ses_a"))["name"] == "A"
+
+
+# --- the plain opencode process path, unchanged ------------------------------
+
+
+def test_opencode_register_without_meta_is_a_pid_backed_file_bus_peer(bus, peer, monkeypatch):
+    holder = subprocess.Popen(["sleep", "60"])
+    try:
+        monkeypatch.setattr(mcp_server, "host_pid", lambda kind, a, b: holder.pid)
+        monkeypatch.setattr(mcp_server, "start_uds_listen", lambda name, pid: None)
+        got = _result(_call("register", {"name": "proc", "kind": "codex"}))
+        assert got["kind"] == "opencode"
+        [entry] = [e for e in store.load_roster(bus) if e.name == "proc"]
+        assert entry.kind == "opencode"
+        assert entry.pid == holder.pid
+        assert not entry.id.startswith("opencode:tui:")
+        messages.send(AgentTarget("proc"), "hi", from_name=AgentTarget(peer), home=bus)
+        [msg] = store.get_inbox(target=AgentTarget("proc"), home=bus)
+        assert msg["text"] == "hi"
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+# --- register tells a session whether anyone can reach it yet ----------------
+
+
+def test_register_session_reports_reachable_when_a_tui_has_it_open(bus):
+    assert agents.register_session("A", "ses_a", home=bus)["reachable"] is True
+
+
+def test_register_session_reports_unreachable_when_no_tui_has_it_open(bus, monkeypatch):
+    monkeypatch.setattr(opencode_presence, "is_open", lambda sid, home=None: False)
+    assert agents.register_session("A", "ses_a", home=bus)["reachable"] is False

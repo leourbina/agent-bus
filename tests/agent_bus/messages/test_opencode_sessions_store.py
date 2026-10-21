@@ -172,3 +172,36 @@ def test_codex_thread_pruning_unchanged(bus, open_sessions):
     store.prune_dead_roster(bus)
     assert "codex:thread:x" in _ids(bus)
     assert any(e.id == "codex:thread:x" for e in store.get_live_roster(bus))
+
+
+# An address-shaped name would let one session impersonate another: a session
+# registered as `opencode:tui:ses_b` receives replies meant for unregistered
+# session B (which sends labelled with its address) and sends under B's label.
+ADDRESS_SHAPED = [
+    "opencode:tui:ses_b",
+    "codex:thread:t1",
+    "claude:session:abc",
+    "x:bus:uuid",
+    "claude:abc",
+    "ses_b",
+]
+
+
+@pytest.mark.parametrize("name", ADDRESS_SHAPED)
+def test_register_session_rejects_address_shaped_names(bus, open_sessions, name):
+    open_sessions.add(SID)
+    with pytest.raises(ValueError, match="looks like an address"):
+        _session(bus, name)
+    assert EID not in _ids(bus)
+
+
+@pytest.mark.parametrize("name", ADDRESS_SHAPED)
+def test_register_rejects_address_shaped_names(bus, live_pid, name):
+    with pytest.raises(ValueError, match="looks like an address"):
+        store.register(name, "other", pid=live_pid, home=bus)
+    assert store.load_roster(bus) == []
+
+
+@pytest.mark.parametrize("name", ["Platform", "a:pid:3", "sess_b", "my-ses_b"])
+def test_ordinary_names_are_still_accepted(bus, live_pid, name):
+    assert store.register(name, "other", pid=live_pid, home=bus).name == name

@@ -18,7 +18,7 @@ from typing import Any
 from . import log as bus_log
 from . import registry_events as ev
 from .adapters import addressing
-from .address import TUI
+from .address import BUS, SESSION, THREAD, TUI
 from .address import parse as parse_address
 from .logevents import describe_error
 
@@ -494,6 +494,26 @@ def _make_inbox_ref(entry_id: str, home: str | None = None) -> str:
     return f"file:{_inbox_path_for(entry_id, home)}"
 
 
+_ADDRESS_SPACES = frozenset({BUS, SESSION, THREAD, TUI})
+
+
+def _check_name(name: str) -> None:
+    """Refuse a name that reads as an address.
+
+    A name is matched before ids, so a session registered as
+    `opencode:tui:ses_b` would receive replies meant for unregistered session
+    B (which sends labelled with its address) and could send under B's label.
+    """
+    if not name:
+        raise ValueError("name required")
+    if name.startswith("ses_") or (
+            ":" in name and parse_address(name).space in _ADDRESS_SPACES):
+        raise ValueError(
+            f"name {name!r} looks like an address, and names must not: pick a "
+            "plain name such as 'platform' (no 'kind:space:' prefix, no 'ses_' prefix)."
+        )
+
+
 def register(
     name: str,
     kind: Kind,
@@ -519,8 +539,7 @@ def register(
     # stored by any of the three paths that write it (same-pid rename,
     # takeover, fresh mint) routes nowhere.
     kind = normalize_kind(kind)
-    if not name:
-        raise ValueError("name required")
+    _check_name(name)
 
     all_entries = load_roster(home)
     # Every pid this call could end up asking `ps` about: existing entries
@@ -705,8 +724,7 @@ def register_session(
     """
     ensure_dirs(home)
     kind = normalize_kind(kind)
-    if not name:
-        raise ValueError("name required")
+    _check_name(name)
     all_entries, _ = _prune(load_roster(home), home)
     other_live = [e for e in all_entries if e.id != entry_id and addressing.is_live(e)]
     final_name = _first_free_name(name, _used_names(other_live))

@@ -51,3 +51,43 @@ def test_presence_file_lists_root_session_and_is_removed_on_exit(tmp_path: Path)
     assert presence["updatedAt"]
     assert not (home / "opencode-tui" / f"{out['pid']}.json").exists()
     assert list((home / "opencode-tui").glob("*.tmp")) == []
+
+
+RETRY_DRIVER = """
+import plugin from %(plugin)r;
+import fs from "node:fs";
+import path from "node:path";
+const sessions = { ses_root: {} };
+const api = {
+  ui: { router: { current: () => ({ type: "session", sessionID: "ses_root" }) } },
+  data: { session: { get: (id) => sessions[id] } },
+};
+const home = process.env.AGENT_BUS_HOME;
+fs.mkdirSync(home, { recursive: true });
+// A plain file where the presence directory belongs: every write fails.
+const dir = path.join(home, "opencode-tui");
+fs.writeFileSync(dir, "in the way");
+plugin.setup(api);
+await new Promise((r) => setTimeout(r, 1200));
+fs.rmSync(dir);
+await new Promise((r) => setTimeout(r, 1200));
+const file = path.join(dir, process.pid + ".json");
+const content = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+console.log(JSON.stringify({ content }));
+"""
+
+
+def test_failed_presence_write_is_retried_on_the_next_tick(tmp_path: Path) -> None:
+    driver = tmp_path / "driver.mjs"
+    driver.write_text(RETRY_DRIVER % {"plugin": PLUGIN.as_uri()})
+    result = subprocess.run(
+        ["node", str(driver)],
+        env={**os.environ, "AGENT_BUS_HOME": str(tmp_path / "bus")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    out = json.loads(result.stdout)
+    assert out["content"] is not None, "root was recorded although its write failed"
+    assert json.loads(out["content"])["sessionIDs"] == ["ses_root"]

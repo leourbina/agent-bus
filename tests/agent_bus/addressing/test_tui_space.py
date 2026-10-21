@@ -1,6 +1,8 @@
 """`tui`: live exactly while a live TUI presence file lists the session."""
 import json
+import os
 import subprocess
+import time
 
 import pytest
 
@@ -88,3 +90,35 @@ def test_address_value_is_used_without_native(bus, spawn):
 
 def test_tui_space_has_no_mailbox():
     assert addressing.has_mailbox(_entry("ses_a")) is False
+
+
+def _age(bus, pid, seconds):
+    """Set a presence file's mtime `seconds` before (negative: after) now."""
+    path = bus / "opencode-tui" / f"{pid}.json"
+    t = time.time() - seconds
+    os.utime(path, (t, t))
+
+
+def test_presence_file_older_than_its_pids_process_is_ignored(bus, spawn):
+    """A TUI killed by a signal can leave its file; once the pid is reused by a
+    process started after the file was written, the file is stale."""
+    holder = spawn()
+    _write(bus, holder.pid, ["ses_a"])
+    _age(bus, holder.pid, 3600)
+    assert addressing.is_live(_entry("ses_a")) is False
+
+
+def test_presence_file_written_after_its_process_started_counts(bus, spawn):
+    holder = spawn()
+    time.sleep(1.1)
+    _write(bus, holder.pid, ["ses_a"])
+    assert addressing.is_live(_entry("ses_a")) is True
+
+
+def test_presence_file_within_clock_tolerance_counts(bus, spawn):
+    """The plugin writes moments after its process starts; coarse clocks may
+    put the mtime a little before the recorded start."""
+    holder = spawn()
+    _write(bus, holder.pid, ["ses_a"])
+    _age(bus, holder.pid, 1)
+    assert addressing.is_live(_entry("ses_a")) is True

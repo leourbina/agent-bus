@@ -83,7 +83,9 @@ def root_session(session_id: str) -> str:
 
     A subagent's task runs in a child session, and its tool calls carry the
     child's id; the agent on the bus is the conversation it serves. If the
-    server cannot answer, the id is returned unchanged (and not cached).
+    server cannot answer, or answers with something that is not a session,
+    the id is returned unchanged (and not cached). Never raises: this runs on
+    every tool call of a server all hosted sessions share.
     """
     cached = _ROOTS.get(session_id)
     if cached is not None:
@@ -92,13 +94,17 @@ def root_session(session_id: str) -> str:
     seen = {current}
     try:
         while True:
-            session = _api("session.get", sessionID=current) or {}
+            session = _api("session.get", sessionID=current)
+            if session is None:
+                break
+            if not isinstance(session, dict):
+                return session_id
             parent = session.get("parentID")
             if not parent or parent in seen:
                 break
             current = str(parent)
             seen.add(current)
-    except OpenCodeError:
+    except Exception:  # noqa: BLE001  # any failure means "cannot tell"; see docstring
         return session_id
     for visited in seen:
         _ROOTS[visited] = current

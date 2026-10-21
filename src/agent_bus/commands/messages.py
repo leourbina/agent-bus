@@ -16,6 +16,7 @@ from typing import Any
 from .. import command_events as ev
 from .. import store
 from ..adapters import addressing, transport
+from ..address import TUI
 from ..log import emit, logged
 from ..protocol import (
     AgentTarget,
@@ -135,6 +136,11 @@ def _refuse_if_not_live(to: str, entry: Any) -> None:
     """
     if addressing.is_live(entry):
         return
+    if addressing.for_entry(entry).SPACE == TUI:
+        raise ValueError(
+            f"receiver unavailable: {to} is an OpenCode session, but no OpenCode "
+            "TUI has the session open, so nothing would read this. Not sent."
+        )
     raise ValueError(
         f"receiver unavailable: {to} is registered as a {entry.kind} peer but "
         "its process is not running, so nothing would read this. Not sent. "

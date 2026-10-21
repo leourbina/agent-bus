@@ -381,7 +381,9 @@ def register_session(name: str, session_id: str, home: str | None = None) -> dic
     """Claim a name on the bus for one OpenCode session."""
     entry = store.register_session(
         name, "opencode", session_address(session_id), {"sessionID": session_id}, home=home)
-    return {**roster_to_public(entry), "registered": True}
+    # Registered either way; reachable only while some TUI has it open.
+    return {**roster_to_public(entry), "registered": True,
+            "reachable": addressing.is_live(entry)}
 
 
 @logged
