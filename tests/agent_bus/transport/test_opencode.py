@@ -96,7 +96,7 @@ def test_send_queues_a_prompt_that_says_who_it_is_from(bus, fake_api):
     assert result["to"] == "OpenArtifacts Platform"
     [(session_id, data)] = fake_api
     assert session_id == SESSION_ID
-    assert data["delivery"] == "queue"
+    assert data["delivery"] == "steer"
     assert data["text"].endswith("\n\nship it")
     assert "from Manager" in data["text"]
     assert f"opencode:tui:{SESSION_ID}" in data["text"]

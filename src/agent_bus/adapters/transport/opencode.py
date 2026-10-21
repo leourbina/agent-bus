@@ -7,10 +7,13 @@ nothing ever wakes it. The session itself is the addressable thing, the way a
 codex thread is: a durable document that accepts input whether or not a TUI is
 attached.
 
-`POST /api/session/{sessionID}/prompt` with `delivery: "queue"` admits the
-message durably and schedules a turn after any running one. Verified live on
-opencode 2.0.32: a queued prompt to an idle, unattached session started a turn
-and was answered within seconds. `opencode api` is the client: it finds the
+`POST /api/session/{sessionID}/prompt` with `delivery: "steer"` admits the
+message durably and wakes the session. A busy session takes every pending
+steer at its next step, in the running turn; `"queue"` instead holds each
+message for a turn of its own after the running one, one per turn, so a busy
+agent sending to a peer piles up a backlog it works through serially. Verified
+live on opencode 2.0.32: a prompt to an idle, unattached session started a
+turn and was answered within seconds. `opencode api` is the client: it finds the
 service and carries its password, so nothing here reads OpenCode's config.
 
 Addresses are `opencode:tui:<sessionID>`: open only while a TUI has the
@@ -35,7 +38,7 @@ NAME = "opencode-service"
 SPACE = _address.TUI
 
 COMMAND = "opencode"
-DELIVERY = "queue"
+DELIVERY = "steer"
 TIMEOUT = 15.0
 
 
@@ -183,8 +186,8 @@ def send(
     from_name: AgentTarget | None = None,
     home: str | None = None,
 ) -> dict[str, Any]:
-    """Queue a prompt for an opencode session. Durable: the server admits it
-    before scheduling a turn."""
+    """Steer a prompt into an opencode session. Durable: the server admits it
+    before waking the session."""
     session_id = (entry.get("native") or {}).get("sessionID")
     if not session_id:
         raise ValueError(f"{entry.get('name')} is not an opencode session")
