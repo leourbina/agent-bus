@@ -749,6 +749,28 @@ def _read_stdio_message(inp: BinaryIO) -> dict[str, Any] | None:
     return parsed
 
 
+def _has_buffered_input(inp: BinaryIO) -> bool:
+    """True if `inp` already holds unread bytes, without ever blocking.
+
+    A client that writes several frames back to back (OpenCode sends
+    notifications/initialized and tools/list together) has them all pulled
+    into the reader's buffer by the first readline(); the fd then looks empty
+    to select()/the fs watcher, which would wait forever with those frames
+    unanswered. Peeking with the fd briefly non-blocking returns the buffer
+    as-is, or b"" when it is empty and nothing more has arrived.
+    """
+    peek = getattr(inp, "peek", None)  # not on BinaryIO itself, only some concrete streams
+    if peek is None:
+        return False
+    fd = inp.fileno()
+    blocking = os.get_blocking(fd)
+    os.set_blocking(fd, False)
+    try:
+        return bool(peek(1))
+    finally:
+        os.set_blocking(fd, blocking)
+
+
 def _write_stdio_message(out: BinaryIO, msg: dict[str, Any]) -> None:
     data = json.dumps(msg).encode("utf-8")
     if _LAST_FRAMING == "content-length":
@@ -950,7 +972,11 @@ def serve(stdin: BinaryIO | None = None, stdout: BinaryIO | None = None) -> None
                 else:
                     watched_dirs = []
 
-            if waiter is not None:
+            if _has_buffered_input(inp):
+                # Frames already read off the fd: answer them before waiting
+                # on it, or they sit unanswered until the client writes again.
+                input_ready = True
+            elif waiter is not None:
                 input_ready, _dir_changed = waiter.wait(NOTIFICATION_SAFETY_NET_SECONDS)
                 # Recheck regardless of whether the wake was a real
                 # directory event or the safety net's timeout elapsing --
