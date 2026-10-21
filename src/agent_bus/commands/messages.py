@@ -50,7 +50,7 @@ def send(
     entry = store.resolve_target(to, home)
     if entry is not None:
         _refuse_if_not_live(to, entry)
-        adapter = transport.for_kind(entry.kind)
+        adapter = transport.for_kind(entry.kind, addressing.for_entry(entry).SPACE)
         # roster_to_dict, not roster_to_public: an adapter is inside the bus and
         # needs the parts a caller must never see -- native, pid, inbox path.
         payload = roster_to_dict(entry)

@@ -1,4 +1,4 @@
-"""`thread` -- a Codex thread. The space with no liveness rule.
+"""`thread` -- a Codex thread or an OpenCode session. No liveness rule.
 
 A thread is a durable document; processes attach to it and detach. Verified
 against a real app-server: every thread reports status `notLoaded` and

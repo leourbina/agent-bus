@@ -187,3 +187,15 @@ def short_sock_dir():
     os.makedirs(sock_dir, exist_ok=True)
     yield sock_dir
     shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _never_the_developers_own_opencode(monkeypatch):
+    """No test reaches the OpenCode server on the machine running the suite.
+
+    `resolve_unknown` asks the opencode transport about every target the bus
+    misses, and it answers by running `opencode api` -- against the developer's
+    live background service, a real network call per lookup. A test that means
+    to exercise it patches `_available` back explicitly.
+    """
+    monkeypatch.setattr("agent_bus.adapters.transport.opencode._available", lambda: False)

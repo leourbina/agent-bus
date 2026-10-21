@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from typing import Any
 
@@ -100,6 +101,13 @@ def _who() -> dict[str, Any]:
     answer a question this only needs an approximate answer to -- what to
     label the line, not a decision anything acts on.
     """
+    # Reading the roster can itself log (`roster_file_unreadable`), and that
+    # record asks for identity again: one corrupt roster file recursed to the
+    # interpreter's limit, two branched exponentially and hung the process.
+    # A record written while identity is being resolved goes unlabelled.
+    if getattr(_resolving, "active", False):
+        return {}
+    _resolving.active = True
     try:
         from .store import self_name_and_kind_for_logging
 
@@ -110,6 +118,11 @@ def _who() -> dict[str, Any]:
         return {"agent": name, "kind": kind}
     except Exception:  # noqa: BLE001  # never fail a record over identity
         return {}
+    finally:
+        _resolving.active = False
+
+
+_resolving = threading.local()
 
 
 def _version() -> str:
