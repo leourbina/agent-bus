@@ -22,9 +22,9 @@ from typing import Any
 
 from ...address import Address
 from ...address import parse as parse_address
-from . import bus, session, thread
+from . import bus, session, thread, tui
 
-ADAPTERS: tuple[Any, ...] = (bus, session, thread)
+ADAPTERS: tuple[Any, ...] = (bus, session, thread, tui)
 
 # What an unrecognised space gets. Process-backed with a mailbox is what every
 # address meant before spaces existed, so an unknown one behaves as it always
@@ -75,4 +75,5 @@ __all__ = [
     "is_live",
     "session",
     "thread",
+    "tui",
 ]

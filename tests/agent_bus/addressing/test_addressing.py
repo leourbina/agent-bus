@@ -5,7 +5,7 @@ import pytest
 
 from agent_bus.adapters import addressing
 from agent_bus.adapters.contracts import AddressSpace
-from agent_bus.address import BUS, SESSION, THREAD
+from agent_bus.address import BUS, SESSION, THREAD, TUI
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def test_every_space_satisfies_the_contract(mod):
 
 
 def test_the_spaces_are_what_we_say_they_are():
-    assert {m.SPACE for m in addressing.ADAPTERS} == {BUS, SESSION, THREAD}
+    assert {m.SPACE for m in addressing.ADAPTERS} == {BUS, SESSION, THREAD, TUI}
 
 
 def test_thread_is_the_only_space_without_a_liveness_rule():
@@ -37,7 +37,7 @@ def test_thread_is_the_only_space_without_a_liveness_rule():
     by_space = {}
     for mod in addressing.ADAPTERS:
         by_space[mod.SPACE] = mod.is_live({**dead, "id": f"x:{mod.SPACE}:v"})
-    assert by_space == {BUS: False, SESSION: False, THREAD: True}
+    assert by_space == {BUS: False, SESSION: False, THREAD: True, TUI: False}
 
 
 def test_a_thread_is_live_with_no_process_at_all():

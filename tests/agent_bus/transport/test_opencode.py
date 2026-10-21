@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from agent_bus import store
+from agent_bus import opencode_presence, store
 from agent_bus.adapters import transport
 from agent_bus.adapters.transport import opencode
 from agent_bus.commands import messages
@@ -54,12 +54,13 @@ def fake_api(monkeypatch):
 
     monkeypatch.setattr(opencode, "_api", _api)
     monkeypatch.setattr(opencode, "_available", lambda: True)
+    monkeypatch.setattr(opencode_presence, "is_open", lambda sid, home=None: True)
     monkeypatch.setattr(transport.codex, "resolve", lambda target: None)
     return prompts
 
 
 @pytest.mark.parametrize("spelling", [
-    f"opencode:thread:{SESSION_ID}",  # the id the bus itself emits
+    f"opencode:tui:{SESSION_ID}",  # the id the bus itself emits
     SESSION_ID,                       # a bare session id
     "OpenArtifacts Platform",         # a top-level session's title
 ])
@@ -67,7 +68,7 @@ def test_every_spelling_reaches_the_same_session(fake_api, spelling):
     entry = opencode.resolve(AgentTarget(spelling))
     assert entry is not None
     assert entry["native"] == {"sessionID": SESSION_ID}
-    assert entry["id"] == f"opencode:thread:{SESSION_ID}"
+    assert entry["id"] == f"opencode:tui:{SESSION_ID}"
 
 
 def test_the_address_we_emit_is_one_we_accept(fake_api):
@@ -98,7 +99,7 @@ def test_send_queues_a_prompt_that_says_who_it_is_from(bus, fake_api):
     assert data["delivery"] == "queue"
     assert data["text"].endswith("\n\nship it")
     assert "from Manager" in data["text"]
-    assert f"opencode:thread:{SESSION_ID}" in data["text"]
+    assert f"opencode:tui:{SESSION_ID}" in data["text"]
 
 
 def test_an_mcp_registered_opencode_peer_still_reads_its_file_inbox(bus, holder, fake_api):
@@ -115,10 +116,18 @@ def test_a_server_refusal_is_raised_not_swallowed(bus, monkeypatch):
         raise opencode.OpenCodeError("Session not found")
 
     monkeypatch.setattr(opencode, "_api", refuse)
-    entry = {"id": f"opencode:thread:{SESSION_ID}", "name": "x", "kind": "opencode",
+    entry = {"id": f"opencode:tui:{SESSION_ID}", "name": "x", "kind": "opencode",
              "native": {"sessionID": SESSION_ID}}
     with pytest.raises(opencode.OpenCodeError):
         opencode.send(entry, "hi")
+
+
+def test_a_closed_session_is_not_resolved(bus, fake_api, monkeypatch):
+    monkeypatch.setattr(opencode_presence, "is_open", lambda sid, home=None: False)
+    assert opencode.resolve(AgentTarget(SESSION_ID)) is None
+    with pytest.raises(ValueError, match="no such agent"):
+        messages.send(AgentTarget(SESSION_ID), "hi", home=bus)
+    assert fake_api == []
 
 
 def test_no_opencode_binary_means_not_mine(monkeypatch):

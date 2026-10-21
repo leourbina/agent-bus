@@ -13,8 +13,8 @@ opencode 2.0.32: a queued prompt to an idle, unattached session started a turn
 and was answered within seconds. `opencode api` is the client: it finds the
 service and carries its password, so nothing here reads OpenCode's config.
 
-Addresses are `opencode:thread:<sessionID>`, in the thread space because that
-is the space's policy exactly -- always live, no file inbox. An opencode
+Addresses are `opencode:tui:<sessionID>`: open only while a TUI has the
+session, per its presence file (opencode_presence); no file inbox. An opencode
 registration made by the MCP server (bus space) is not this transport's: it
 still reads its file inbox, so routing matches on SPACE as well as KIND.
 """
@@ -27,11 +27,12 @@ import subprocess
 from typing import Any
 
 from ... import address as _address
+from ... import opencode_presence
 from ...protocol import AgentTarget
 
 KIND = "opencode"
 NAME = "opencode-service"
-SPACE = _address.THREAD
+SPACE = _address.TUI
 
 COMMAND = "opencode"
 DELIVERY = "queue"
@@ -108,6 +109,8 @@ def resolve(target: AgentTarget) -> dict[str, Any] | None:
     if not session or not session.get("id"):
         return None
     session_id = str(session["id"])
+    if not opencode_presence.is_open(session_id):
+        return None
     return {
         "id": str(_address.mint(KIND, SPACE, session_id)),
         "name": session.get("title") or session_id,

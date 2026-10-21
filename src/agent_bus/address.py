@@ -37,6 +37,7 @@ from dataclasses import dataclass
 BUS = "bus"
 SESSION = "session"
 THREAD = "thread"
+TUI = "tui"
 
 # A fourth space, PID, was retired (git log has why). `codex:pid:<n>` and
 # `omp:tty:<n>` ids still parse fine, just as an unrecognised space now.
