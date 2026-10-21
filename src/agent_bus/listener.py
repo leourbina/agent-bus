@@ -122,6 +122,100 @@ def start_uds_listen(name: str, host_pid: int, home: str | None = None) -> int |
     return proc.pid
 
 
+def session_listener_pid_path(session_id: str, home: str | None = None) -> str:
+    """`listeners/opencode-<sessionID>.pid`: keyed by the session, not a host pid.
+
+    One OpenCode service hosts every session, so no host pid belongs to any one
+    of them. The `opencode-` prefix keeps these apart from the `<host pid>.pid`
+    files, which `host_pid_for_listener` parses as integers.
+    """
+    if not session_id or os.path.basename(session_id) != session_id:
+        raise ValueError(f"not a session id: {session_id!r}")
+    return os.path.join(_listener_dir(home), f"opencode-{session_id}.pid")
+
+
+def _recorded_live_pid(pid_path: str) -> int | None:
+    try:
+        with open(pid_path, encoding="utf-8") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def start_session_listen(name: str, session_id: str, home: str | None = None) -> int | None:
+    """Detached listener for one OpenCode session: its own return socket.
+
+    Idempotent: a live listener recorded for the session is reused. Spawned the
+    way `start_uds_listen` spawns one (detached, env and home passed through,
+    a log file for tracebacks only), but it watches the session's presence
+    instead of a host pid, and delivers what it receives into the session.
+    """
+    pid_path = session_listener_pid_path(session_id, home)
+    old = _recorded_live_pid(pid_path)
+    if old is not None:
+        bus_log.emit(ev.SessionListenerSpawnDecided(
+            decision="already_running", name=name, session_id=session_id,
+            path=pid_path, listener_pid=old))
+        return old
+    with contextlib.suppress(OSError):
+        os.unlink(pid_path)
+    log_path = os.path.join(_listener_dir(home), f"opencode-{session_id}.log")
+    child_env = os.environ.copy()
+    if home:
+        child_env["AGENT_BUS_HOME"] = home
+    with open(log_path, "ab") as log:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agent_bus", "listen",
+             "--session", session_id, "--name", name],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=child_env,
+        )
+    with open(pid_path, "w", encoding="utf-8") as f:
+        f.write(str(proc.pid) + "\n")
+    bus_log.emit(ev.SessionListenerSpawnDecided(
+        decision="spawned", name=name, session_id=session_id, path=pid_path,
+        listener_pid=proc.pid))
+    return proc.pid
+
+
+def stop_session_listen(session_id: str, home: str | None = None, wait: float = 3.0) -> bool:
+    """SIGTERM the listener recorded for this session, by its recorded pid only.
+
+    Waits (up to `wait`) for it to go, so a replacement started next does not
+    race its cleanup of the session's roster entry.
+    """
+    pid_path = session_listener_pid_path(session_id, home)
+    pid = _recorded_live_pid(pid_path)
+    if pid is None:
+        with contextlib.suppress(OSError):
+            os.unlink(pid_path)
+        bus_log.emit(ev.SessionListenerStopped(
+            decision="not_running", session_id=session_id, path=pid_path))
+        return False
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        # Reap it if it is our child, or a zombie reads as alive forever.
+        with contextlib.suppress(ChildProcessError, OSError):
+            os.waitpid(pid, os.WNOHANG)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        time.sleep(0.05)
+    with contextlib.suppress(OSError):
+        os.unlink(pid_path)
+    bus_log.emit(ev.SessionListenerStopped(
+        decision="signalled", session_id=session_id, path=pid_path, listener_pid=pid))
+    return True
+
+
 def _patch_published_session(host_pid: int, patch: dict[str, Any], home: str | None = None) -> bool:
     """Merge fields into the session file our listener publishes.
 

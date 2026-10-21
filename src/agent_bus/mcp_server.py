@@ -278,7 +278,8 @@ def _call_ack(args: dict[str, Any], session: str | None) -> Any:
 
 def _call_register(args: dict[str, Any], session: str | None) -> Any:
     if session is not None:
-        # The session is the agent, not this process: no pid, so no listener.
+        # The session is the agent, not this process: no pid. Its listener is
+        # keyed by the session id instead (agents.register_session starts it).
         return agents.register_session(args["name"], session)
     # Once the handshake has identified this connection's kind, that answer
     # is authoritative -- _register_tool() already omits `kind` from the

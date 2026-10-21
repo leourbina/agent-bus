@@ -26,16 +26,21 @@ import uuid
 
 from . import address, log
 from . import uds_events as ev
+from .adapters import addressing
+from .listener import session_listener_pid_path
 from .logevents import bind_trace, describe_error
 from .paths import claude_sessions_dir
-from .protocol import AgentTarget
+from .protocol import AgentTarget, MessageId, RosterEntry, new_id
 from .store import (
     ancestor_pids,
     ensure_dirs,
+    find_entry,
     get_home,
     get_live_roster,
     is_pid_alive,
+    load_roster,
     register,
+    save_roster_entry,
     send_message,
 )
 
@@ -308,13 +313,64 @@ def _dial_back(status: dict[str, str | int], from_val: object, sock_path: str) -
                 s.close()
 
 
+def _session_entry(entry_id: str) -> RosterEntry | None:
+    return next((e for e in load_roster() if e.id == entry_id), None)
+
+
+def _set_listen_sock(entry_id: str, session_id: str, sock_path: str, present: bool) -> None:
+    """Record (or withdraw) our socket on the session's roster entry.
+
+    `native.listenSock` is how a send from the session finds its return
+    address (`_our_socket`). The alias is what folds the session file we
+    publish into the session's own row in a listing, instead of a second one.
+    Withdrawn only while it still names our socket: a replacement listener may
+    already have recorded its own.
+    """
+    entry = _session_entry(entry_id)
+    if entry is None:
+        return
+    alias = str(address.mint("agentbus", address.SESSION, session_id))
+    native = dict(entry.native)
+    aliases = list(entry.aliases)
+    if present:
+        if native.get("listenSock") == sock_path and alias in aliases:
+            return
+        native["listenSock"] = sock_path
+        if alias not in aliases:
+            aliases.append(alias)
+    else:
+        if native.get("listenSock") != sock_path:
+            return
+        native.pop("listenSock", None)
+        aliases = [a for a in aliases if a != alias]
+    entry.native = native
+    entry.aliases = aliases
+    save_roster_entry(entry)
+
+
+def _deliver_into_session(entry_id: str, text: str, from_name: AgentTarget) -> MessageId:
+    """Hand an inbound frame to the session through the normal send path, so a
+    Claude peer's native reply lands in the session's own conversation."""
+    from .commands import messages
+
+    mid = MessageId(new_id())
+    messages.send(to=AgentTarget(entry_id), text=text, from_name=from_name, message_id=mid)
+    return mid
+
+
 def run_listen(
     name: str = "agent-bus",
     pid: int | None = None,
     inbox_name: str | None = None,
     adopt: bool = False,
+    session_id: str | None = None,
 ) -> None:
     """Run the UDS listener. Blocks until signal. Cleans up on exit.
+
+    With `session_id`, this is one OpenCode session's listener: it registers
+    nothing (the session's own entry is the identity), records its socket on
+    that entry as `native.listenSock`, delivers inbound frames into the
+    session, and exits once the session is no longer live.
 
     Publishes to real (or overridden) Claude sessions dir so ListAgents sees us.
     Binds our socket. Receives frames, logs them, acks with a control
@@ -330,6 +386,18 @@ def run_listen(
     watch_pid = int(pid) if pid else None
     publish_pid = os.getpid()
 
+    session_entry_id = None
+    if session_id:
+        session_entry_id = str(address.mint("opencode", address.TUI, session_id))
+        found = _session_entry(session_entry_id)
+        if found is None or not addressing.is_live(found):
+            # Nothing to serve: binding first would publish a socket for a
+            # session nobody can reach, and only to tear it down again.
+            log.emit(ev.SessionListenerEnded(
+                session_id=session_id, why="unregistered" if found is None else "not_live"))
+            return
+        watch_pid = None
+
     # Register under the host pid, so a sibling process can find this listener.
     # start_uds_listen() writes this file when it spawns a listener; run_listen
     # did not, so `agent-bus listen --pid $$` published a working socket that
@@ -337,7 +405,13 @@ def run_listen(
     # ancestors for listeners/<ancestor>.pid. A harness with no MCP server has
     # only this CLI, so without it a shell-only peer can receive but not send.
     host_pid_file = None
-    if watch_pid:
+    if session_id:
+        # start_session_listen wrote this already; a listener started by hand
+        # has to be findable the same way.
+        host_pid_file = session_listener_pid_path(session_id)
+        with open(host_pid_file, "w", encoding="utf-8") as f:
+            f.write(str(publish_pid) + "\n")
+    elif watch_pid:
         try:
             ldir = os.path.join(get_home(), "listeners")
             os.makedirs(ldir, exist_ok=True)
@@ -387,7 +461,17 @@ def run_listen(
     def _atexit():
         # Ours to remove: a stale entry points at a listener that is gone, and
         # send() would resolve a socket nobody is bound to.
-        if host_pid_file:
+        if session_entry_id and session_id:
+            # A replacement may already have recorded itself in both places.
+            with contextlib.suppress(Exception):
+                _set_listen_sock(session_entry_id, session_id, sock_path, present=False)
+            if host_pid_file:
+                with contextlib.suppress(OSError, ValueError):
+                    with open(host_pid_file, encoding="utf-8") as f:
+                        recorded = int(f.read().strip())
+                    if recorded == publish_pid:
+                        os.unlink(host_pid_file)
+        elif host_pid_file:
             with contextlib.suppress(OSError):
                 os.unlink(host_pid_file)
         _cleanup(sock_path, _state["session_path"], server, _state["key_path"])
@@ -420,7 +504,15 @@ def run_listen(
     # frames, and the inbox we persist to. The UDS side is not a second identity.
     requested = inbox_name or name
     entry = None
-    if watch_pid:
+    if session_entry_id:
+        # The session's own entry is the identity; registering would mint a
+        # second one under this process's pid.
+        entry = _session_entry(session_entry_id)
+        if entry is None:
+            log.emit(ev.SessionListenerEnded(session_id=session_id or "", why="unregistered"))
+            _atexit()
+            return
+    elif watch_pid:
         # Started for a host that session_start() already registered. Adopt that
         # entry: registering again would create a SECOND identity for one peer and
         # collide on the name, landing as "<name>-2". One peer, one socket, one
@@ -479,13 +571,20 @@ def run_listen(
     # through explicitly -- register()'s same-pid branch overwrites it
     # unconditionally, so omitting it here would silently wipe a value
     # nothing about this call actually changed.
-    session_alias = str(address.mint("agentbus", address.SESSION, bus_id))
-    register(bus_name, entry.kind, pid=entry.pid, cwd=entry.cwd, aliases=[session_alias])
-    log.emit(ev.ListenerAliasRegistered(name=bus_name, alias=session_alias))
+    if session_entry_id and session_id:
+        # Published under the bare session id, so discovery's
+        # `agentbus:<sessionID>` matches the alias _set_listen_sock records.
+        published_id = session_id
+        _set_listen_sock(session_entry_id, session_id, sock_path, present=True)
+    else:
+        published_id = bus_id
+        session_alias = str(address.mint("agentbus", address.SESSION, bus_id))
+        register(bus_name, entry.kind, pid=entry.pid, cwd=entry.cwd, aliases=[session_alias])
+        log.emit(ev.ListenerAliasRegistered(name=bus_name, alias=session_alias))
 
     sess_d = _sessions_dir()
     session_path = _write_our_session(
-        publish_pid, bus_name, sock_path, sess_d, bus_id
+        publish_pid, bus_name, sock_path, sess_d, published_id
     )
     key_path = _key_path(publish_pid, sock_path, sess_d)
     # From here on, a signal's _cleanup has something to unlink beyond the
@@ -588,8 +687,11 @@ def run_listen(
             log.emit(ev.FrameTextExtracted(sender=str(from_name), wrapped=m is not None,
                                            text_len=len(text or "")))
             try:
-                delivered = send_message(to=bus_id, text=text or "",
-                                         from_name=from_name, from_kind="other")
+                if session_entry_id:
+                    delivered = _deliver_into_session(session_entry_id, text or "", from_name)
+                else:
+                    delivered = send_message(to=bus_id, text=text or "",
+                                             from_name=from_name, from_kind="other")
                 # An envelope for a path the command layer never sees. Without
                 # it a UDS delivery leaves no record at any level, which is how
                 # a whole surface came to be unmeasurable.
@@ -663,6 +765,18 @@ def run_listen(
         while True:
             if watch_pid is not None and not is_pid_alive(watch_pid):
                 break
+            if session_entry_id and session_id:
+                # Checked once per accept timeout (2s), well inside the 5s bound.
+                current = _session_entry(session_entry_id)
+                if current is None or not addressing.is_live(current):
+                    log.emit(ev.SessionListenerEnded(
+                        session_id=session_id,
+                        why="unregistered" if current is None else "not_live"))
+                    break
+                # Self-healing: a concurrent whole-entry save can drop it.
+                if current.native.get("listenSock") != sock_path:
+                    with contextlib.suppress(Exception):
+                        _set_listen_sock(session_entry_id, session_id, sock_path, present=True)
             try:
                 conn, peer = server.accept()
             except TimeoutError:
@@ -676,7 +790,10 @@ def run_listen(
     except KeyboardInterrupt:
         pass
     finally:
-        _cleanup(sock_path, session_path, server, key_path)
+        if session_entry_id:
+            _atexit()
+        else:
+            _cleanup(sock_path, session_path, server, key_path)
 
 def _envelope(our_sock: str, text: str, from_name: str | None = None) -> str:
     """The cross-session-message wrapper, and who it says the message is from.
@@ -700,8 +817,24 @@ def _envelope(our_sock: str, text: str, from_name: str | None = None) -> str:
     )
 
 
-def _our_socket() -> str | None:
+def _session_listen_sock(sender: str) -> str | None:
+    """The return socket recorded by the sending OpenCode session's listener."""
+    entry = find_entry(AgentTarget(sender))
+    if entry is None or address.parse(str(entry.id), kind_hint=entry.kind).space != address.TUI:
+        return None
+    sock = entry.native.get("listenSock")
+    return sock if isinstance(sock, str) and os.path.exists(sock) else None
+
+
+def _our_socket(sender: str | None = None) -> str | None:
     """The socket a send names as its own return address, or None.
+
+    `sender` first: an OpenCode session's MCP calls come from a server that
+    every session shares, so nothing about this process names the session.
+    The sender's name does (the MCP server derives it from the call's
+    `_meta`, never from tool arguments), and a session's own listener records
+    its socket on the session's entry. A sender that is not a session falls
+    through to the steps below, unchanged.
 
     The recipient dials `from` back to ack, so a wrong answer here does not
     fail -- it succeeds and delivers the reply to whoever owns the socket we
@@ -728,6 +861,15 @@ def _our_socket() -> str | None:
     random stranger, it reliably picked the peer whose job is relaying off
     the machine.
     """
+    if sender:
+        try:
+            sock = _session_listen_sock(sender)
+        except OSError:
+            sock = None
+        if sock:
+            log.emit(ev.OwnSocketResolved(socket=sock, via="session_listener"))
+            return sock
+
     sd = _sock_dir()
 
     env_sock = os.environ.get("AGENT_BUS_LISTEN_SOCK")
@@ -778,7 +920,7 @@ def send_peer_message(target_sock: str, text: str, from_name: str | None = None)
     target_sock: full path to target .sock
     Returns success bool.
     """
-    our_sock = _our_socket()
+    our_sock = _our_socket(from_name)
     if not our_sock:
         log.emit(ev.SendPeerFailed(why="no_own_socket", path=target_sock))
         return False

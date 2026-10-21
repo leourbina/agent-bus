@@ -395,6 +395,31 @@ class ListenerStopped(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SessionListenerSpawnDecided(Event):
+    """`decision` is `spawned` or `already_running`."""
+
+    level: ClassVar[Level] = "trace"
+    message: ClassVar[str] = "session_listener_spawn_decided"
+    decision: str
+    name: str
+    session_id: str
+    path: str
+    listener_pid: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionListenerStopped(Event):
+    """`decision` is `signalled` or `not_running`."""
+
+    level: ClassVar[Level] = "trace"
+    message: ClassVar[str] = "session_listener_stopped"
+    decision: str
+    session_id: str
+    path: str
+    listener_pid: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PublishedSessionPatched(Event):
     """`decision` is `patched`, `unchanged`, `no_listener_pid` or `unreadable`."""
 

@@ -298,6 +298,7 @@ def cmd_listen(args: argparse.Namespace) -> int:
             pid=args.pid,
             inbox_name=getattr(args, "inbox_name", None),
             adopt=getattr(args, "adopt", False),
+            session_id=getattr(args, "session", None),
         )
         return 0
     except Exception as e:
@@ -601,6 +602,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--inbox-name",
         default=None,
         help="file-bus inbox target name for inbound UDS user frames (defaults to --name)",
+    )
+    plis.add_argument(
+        "--session",
+        default=None,
+        help="serve one OpenCode session (its sessionID): deliver inbound "
+             "frames into it, and exit once no TUI has it open",
     )
     plis.add_argument(
         "--adopt",
